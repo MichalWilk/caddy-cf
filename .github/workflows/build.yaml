@@ -41,7 +41,7 @@ jobs:
             echo "$info" | jq -r '.Digest'
             echo "EOF"
             echo "version<<EOF"
-            echo "$info" | jq -r '.Labels["org.opencontainers.image.version"]'
+            echo "$info" | jq -r '.Labels["org.opencontainers.image.version"]' | sed 's/^v//'
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -85,5 +85,6 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             caddy.upstream.digest=${{ steps.upstream.outputs.digest }}
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
