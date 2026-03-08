@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
   schedule:
-    # Weekly rebuild to pick up upstream Caddy updates (Monday 04:00 UTC)
-    - cron: "0 4 * * 1"
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 env:
   IMAGE_NAME: caddy-cf
+  UPSTREAM_IMAGE: docker.io/library/caddy:2-alpine
 
 jobs:
   build:
@@ -19,17 +19,53 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Get upstream manifest digest
+        id: upstream
+        env:
+          DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          digest=$(skopeo inspect --raw --creds "$DOCKERHUB_CREDS" \
+            "docker://$UPSTREAM_IMAGE" | sha256sum | cut -d' ' -f1)
+          echo "digest=sha256:$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Check if rebuild needed
+        if: github.event_name == 'schedule'
+        id: check
+        env:
+          UPSTREAM_DIGEST: ${{ steps.upstream.outputs.digest }}
+          GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/caddy-cf:latest
+        run: |
+          current=$(skopeo inspect --creds "$GHCR_CREDS" "docker://$IMAGE_REF" \
+            2>/dev/null | jq -r '.Labels["caddy.upstream.digest"] // empty' || true)
+          if [ -n "$current" ] && [ "$UPSTREAM_DIGEST" = "$current" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged ($UPSTREAM_DIGEST), skipping build"
+          else
+            echo "Upstream changed: $current -> $UPSTREAM_DIGEST"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.skip != 'true'
+
       - uses: docker/metadata-action@v5
+        if: steps.check.outputs.skip != 'true'
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
@@ -39,10 +75,13 @@ jobs:
             type=schedule,pattern={{date 'YYYYMMDD'}}
 
       - uses: docker/build-push-action@v6
+        if: steps.check.outputs.skip != 'true'
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            caddy.upstream.digest=${{ steps.upstream.outputs.digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
