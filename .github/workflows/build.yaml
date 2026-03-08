@@ -32,24 +32,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get upstream manifest digest
+      - name: Get upstream image info
         id: upstream
-        env:
-          DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          digest=$(skopeo inspect --raw --creds "$DOCKERHUB_CREDS" \
-            "docker://$UPSTREAM_IMAGE" | sha256sum | cut -d' ' -f1)
-          echo "digest=sha256:$digest" >> "$GITHUB_OUTPUT"
+          info=$(skopeo inspect --authfile ~/.docker/config.json "docker://$UPSTREAM_IMAGE")
+          {
+            echo "digest<<EOF"
+            echo "$info" | jq -r '.Digest'
+            echo "EOF"
+            echo "version<<EOF"
+            echo "$info" | jq -r '.Labels["org.opencontainers.image.version"]'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check if rebuild needed
         if: github.event_name == 'schedule'
         id: check
         env:
           UPSTREAM_DIGEST: ${{ steps.upstream.outputs.digest }}
-          GHCR_CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
           IMAGE_REF: ghcr.io/${{ github.repository_owner }}/caddy-cf:latest
         run: |
-          current=$(skopeo inspect --creds "$GHCR_CREDS" "docker://$IMAGE_REF" \
+          current=$(skopeo inspect --authfile ~/.docker/config.json "docker://$IMAGE_REF" \
             2>/dev/null | jq -r '.Labels["caddy.upstream.digest"] // empty' || true)
           if [ -n "$current" ] && [ "$UPSTREAM_DIGEST" = "$current" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -71,8 +74,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=sha,prefix=
-            type=schedule,pattern={{date 'YYYYMMDD'}}
+            type=raw,value=${{ steps.upstream.outputs.version }}-alpine
 
       - uses: docker/build-push-action@v6
         if: steps.check.outputs.skip != 'true'
